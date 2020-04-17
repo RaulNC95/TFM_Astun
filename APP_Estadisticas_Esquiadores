@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="initial-scale=1, maximum-scale=1,user-scalable=no"/>
+    <title>Consulta de estadísticas por distancia</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.4.0/Chart.min.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://js.arcgis.com/4.15/esri/themes/light/main.css"/>
+    <style>
+      html,
+      body,
+       {
+        padding: 0;
+        margin: 0;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+      }
+      #viewDiv {
+        position: absolute;
+        left: 0;
+        right: 40%;
+        top: 0;
+        bottom: 0;
+        height: 100%;
+      }
+      #panel {
+        position: absolute;
+        right: 0;
+        height: 100%;
+        width: 40%;
+        overflow: scroll;
+      }
+
+      #num-respuestas {
+        color: #2523AD;
+        font-size: 36pt;
+        font-weight: bolder;
+        line-height: 0.8;
+      }
+      #avg-age {
+        color: #149dcf;
+        font-size: 20pt;
+        font-weight: bolder;
+      }
+      #avg-open-time {
+        color: #149dcf;
+        font-size: 20pt;
+        font-weight: bolder;
+      }
+    </style>
+    <script src="https://js.arcgis.com/4.15/"></script>
+    <script>
+      require([
+        "esri/views/MapView",
+        "esri/WebMap",
+        "esri/widgets/Legend",
+        "esri/widgets/Expand",
+        "esri/widgets/Bookmarks",
+        "esri/core/lang",
+        "esri/core/promiseUtils",
+        "esri/core/watchUtils"
+      ], function(
+        MapView,
+        WebMap,
+        Legend,
+        Expand,
+        Bookmarks,
+        lang,
+        promiseUtils,
+        watchUtils
+      ) {
+        let
+          recomendacionChart,
+          edadChart,
+          genderChart,
+          nivelChart,
+          visitasChart,
+          grupoChart,
+          totalNumber;
+        const webmap = new WebMap({
+          portalItem: {
+            id: "8d37b8e1f5dd4adaab58a9afe5d4b158"
+          }
+        });
+        const view = new MapView({
+          map: webmap,
+          container: "viewDiv",
+          constraints: {
+            minScale: 30000000
+          }
+        });
+
+        const titleContent = document.createElement("div");
+               titleContent.style.padding = "15px";
+               titleContent.style.backgroundColor = "white";
+               titleContent.style.width = "500px";
+               titleContent.innerHTML = [
+                 "<div id='title' class='esri-widget'>",
+                 "<span id='num-respuestas'>0</span> encuestas respondidas por visitantes de la estación ",
+                 "de esquí Astún, en un radio de 100km al rededor del lugar seleccionado.",
+                 "</div>"
+               ].join(" ");
+
+               const titleExpand = new Expand({
+                 expandIconClass: "esri-icon-dashboard",
+                 expandTooltip: "Summary stats",
+                 view: view,
+                 content: titleContent,
+                 expanded: view.widthBreakpoint !== "xsmall"
+               });
+               view.ui.add(titleExpand, "top-right");
+
+      const legendExpand = new Expand({
+          view: view,
+          content: new Legend({
+            view: view
+          }),
+          expanded: view.widthBreakpoint !== "xsmall"
+        });
+        view.ui.add(legendExpand, "bottom-left");
+
+        view.watch("widthBreakpoint", function(newValue) {
+          titleExpand.expanded = newValue !== "xsmall";
+          legendExpand.expanded = newValue !== "xsmall";
+        });
+
+        const bookmarksWidget = new Bookmarks({
+          view: view
+        });
+
+        const bookmarksExpand = new Expand({
+          view: view,
+          content: bookmarksWidget
+        });
+        view.ui.add(bookmarksExpand, "top-right");
+
+        bookmarksWidget.on("select-bookmark", function(event) {
+          bookmarksExpand.expanded = false;
+        });
+
+        const sampleInstructions = document.createElement("div");
+        sampleInstructions.style.padding = "10px";
+        sampleInstructions.style.backgroundColor = "white";
+        sampleInstructions.style.width = "300px";
+        sampleInstructions.innerHTML = [
+          "<b>Arrastre</b> el cursor por el mapa de calor para conocer las estadísticas",
+          "en 100 km al rededor de esa ubicación."
+        ].join(" ");
+
+        const instructionsExpand = new Expand({
+          expandIconClass: "esri-icon-question",
+          expandTooltip: "How to use this sample",
+          view: view,
+          content: sampleInstructions
+        });
+        view.ui.add(instructionsExpand, "top-left");
+
+        view.when().then(function() {
+
+          createCharts();
+
+          const layer = webmap.layers.getItemAt(0);
+          layer.outFields = [
+          "recomendacion",
+          "edad",
+          "genero",
+          "nivel_de_esqui",
+          "visitas",
+          "grupos"
+          ];
+
+          view.whenLayerView(layer).then(function(layerView) {
+            watchUtils.whenFalseOnce(layerView, "updating", function(val) {
+
+              view.on(["click", "drag"], function(event) {
+
+                event.stopPropagation();
+                queryStatsOnDrag(layerView, event)
+                  .then(updateCharts)
+                  .catch(function(error) {
+                    if (error.name !== "AbortError") {
+                      console.error(error);
+                    }
+                  });
+              });
+            });
+          });
+        });
+
+        var queryStatsOnDrag = promiseUtils.debounce(function(
+          layerView,
+          event
+        ) {
+
+          const query = layerView.layer.createQuery();
+          query.geometry = view.toMap(event); //
+          query.distance = 100;
+          query.units = "kilometers";
+
+          const statsQuery = query.clone();
+
+
+          const statDefinitions = [
+
+          // Total
+            {
+              onStatisticField: "1",
+            outStatisticFieldName: "total",
+              statisticType: "count"
+            },
+
+            // Recomendación
+            {
+           onStatisticField:
+             "CASE WHEN  recomendacion = 'si' THEN 1 ELSE 0 END",
+           outStatisticFieldName: "num_si",
+           statisticType: "sum"
+         },
+         {
+           onStatisticField:
+             "CASE WHEN recomendacion = 'no' THEN 1 ELSE 0 END",
+           outStatisticFieldName: "num_no",
+           statisticType: "sum"
+         },
+
+         // Edad
+            {
+              onStatisticField:
+                "CASE WHEN edad = 'mayor_de_65' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_65",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN edad = 'entre_40_y_65' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_40",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN edad = 'entre_25_y_40' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_25",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN edad = 'menor_de_25' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_menores",
+              statisticType: "sum"
+            },
+
+            // Género
+            {
+              onStatisticField:
+                "CASE WHEN genero = 'masculino' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_males",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN genero = 'femenino' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_females",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN genero = 'Unknown' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_unknown_gender",
+              statisticType: "sum"
+            },
+
+            // Nivel de esquí
+            {
+              onStatisticField:
+                "CASE WHEN nivel_de_esqui = 'avanzado' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_avanzado",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN nivel_de_esqui = 'medio' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_medio",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN nivel_de_esqui = 'principiante' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_principiante",
+              statisticType: "sum"
+            },
+
+            // Visitas a la estación
+            {
+              onStatisticField:
+                "CASE WHEN visitas = 'una' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_1",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN visitas = 'dos' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_2",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN visitas = 'tres+' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_3",
+              statisticType: "sum"
+            },
+
+            // Grupos
+            {
+              onStatisticField:
+                "CASE WHEN grupos = 'solo' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_solo",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN grupos = 'en_pareja' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_pareja",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN grupos = 'con_menores' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_familia",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField:
+                "CASE WHEN grupos = 'con_amigos' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_amigos",
+              statisticType: "sum"
+            }
+
+          ];
+
+
+          statsQuery.outStatistics = statDefinitions;
+
+          const allStatsResponse = layerView.queryFeatures(statsQuery).then(
+            function(response) {
+              const stats = response.features[0].attributes;
+              return stats;
+            },
+            function(e) {
+              console.error(e);
+            }
+          );
+
+          return promiseUtils.eachAlways([
+            allStatsResponse
+          ]);
+        });
+
+        function updateCharts(responses) {
+        const allStats = responses[0].value;
+
+        const recomendacionChartStats = [
+             allStats.num_si,
+             allStats.num_no
+           ];
+           updateChart(recomendacionChart, recomendacionChartStats);
+
+        const edadStats = [
+            allStats.num_65,
+            allStats.num_40,
+            allStats.num_25,
+            allStats.num_menores
+          ];
+          updateChart(edadChart, edadStats);
+
+          const genderStats = [
+            allStats.num_males ,
+            allStats.num_females
+          ];
+          updateChart(genderChart, genderStats);
+
+          const nivelStats = [
+            allStats.num_avanzado,
+            allStats.num_medio,
+            allStats.num_principiante
+          ];
+          updateChart(nivelChart, nivelStats);
+
+          const visitasStats = [
+            allStats.num_1,
+            allStats.num_2,
+            allStats.num_3
+          ];
+          updateChart(visitasChart, visitasStats);
+
+          const grupoStats = [
+            allStats.num_solo,
+            allStats.num_pareja,
+            allStats.num_familia,
+            allStats.num_amigos
+          ];
+          updateChart(grupoChart, grupoStats);
+
+         totalNumber.innerHTML = allStats.total;
+
+        }
+
+        function updateChart(chart, dataValues) {
+          if (chart.config.type === "doughnut") {
+            chart.data.datasets[0].data = dataValues;
+          } else {
+            chart.data.datasets[0].data = dataValues
+
+          }
+          chart.update();
+        }
+
+
+        function createCharts() {
+          totalNumber = document.getElementById("num-respuestas");
+
+
+          const recomendacionCanvas = document.getElementById("recomendacion-chart");
+                   recomendacionChart = new Chart(recomendacionCanvas.getContext("2d"), {
+                       type: "bar",
+                     data: {
+                       labels: [
+                         "Sí",
+                         "No"
+                       ],
+                       datasets: [
+                         {
+                          label:"Sí",
+                           backgroundColor: ["#76DE00", "#FB113F"],
+                           stack: "Stack 0",
+                           data: [0, 0]
+                         },
+                         {
+                          label:"No",
+                           backgroundColor: [ "#FB113F"],
+                           stack: "Stack 0",
+                           data: [0, 0]
+                         }
+                       ]
+                     },
+                     options: {
+                       responsive: false,
+                       legend: {
+                         position: "bottom"
+                       },
+                       title: {
+                         display: true,
+                         text: "RECOMIENDAN ASTÚN"
+                       },
+                       scales: {
+                         xAxes: [
+                           {
+                             stacked: true
+                           }
+                         ],
+                         yAxes: [
+                           {
+                             stacked: true,
+                             ticks: {
+                               beginAtZero: true
+                             }
+                           }
+                         ]
+                       }
+                     }
+                   });
+
+
+
+
+
+          const edadCanvas = document.getElementById(
+            "edad-chart"
+          );
+          edadChart = new Chart(edadCanvas.getContext("2d"), {
+                                 type: "horizontalBar",
+                               data: {
+                                 labels: [
+                                   "Mayores de 65",
+                                   "Entre 40 y 65",
+                                   "Entre 25 y 40",
+                                   "Menores de 25"
+                                 ],
+                                 datasets: [
+                                   {
+                                     label: ["Edad por rangos"],
+
+                                     backgroundColor:"#76DE00",
+                                     stack: "Stack 0",
+                                     data:  [0, 0, 0, 0]
+                                   },
+                                 ]
+                               },
+                               options: {
+                                 responsive: false,
+                                 legend: {
+                                   position: "bottom"
+                                 },
+                                 title: {
+                                   display: true,
+                                   text: "EDAD"
+                                 },
+                                 scales: {
+                                   xAxes: [
+                                     {
+                                       stacked: true
+                                     }
+                                   ],
+                                   yAxes: [
+                                     {
+                                       stacked: true,
+                                       ticks: {
+                                         beginAtZero: true
+                                       }
+                                     }
+                                   ]
+                                 }
+                               }
+                             });
+
+    const genderCanvas = document.getElementById("gender-chart");
+                genderChart = new Chart(genderCanvas.getContext("2d"), {
+                  type: "doughnut",
+                  data: {
+                    labels: [
+
+                      "Masculino",
+
+                      "Femenino"
+                    ],
+                    datasets: [
+                      {
+                        backgroundColor: ["#2523AD", "#36C2FF"],
+                        borderColor: "rgb(255, 255, 255)",
+                        borderWidth: 1,
+                        data: [0, 0]
+                      }
+                    ]
+                  },
+                  options: {
+                    responsive: false,
+                    cutoutPercentage: 35,
+                    legend: {
+                      position: "bottom"
+                    },
+                    title: {
+                      display: true,
+                      text: "GÉNERO"
+                    }
+                  }
+                });
+
+      const nivelCanvas = document.getElementById("nivel-chart");
+                  nivelChart = new Chart(nivelCanvas.getContext("2d"), {
+                    type: "doughnut",
+                    data: {
+                      labels: [
+                        "Avanzado",
+
+                        "Medio",
+
+                        "Principiante",
+                      ],
+                      datasets: [
+                        {
+                          backgroundColor: [
+                          "#2523AD", "#76DE00","#36C2FF"
+                          ],
+                          borderColor: "rgb(255, 255, 255)",
+                          borderWidth: 1,
+                          data: [0, 0, 0]
+                        }
+                      ]
+                    },
+                    options: {
+                      responsive: false,
+                      cutoutPercentage: 35,
+                      legend: {
+                        position: "bottom"
+                      },
+                      title: {
+                        display: true,
+                        text: "NIVEL DE ESQUÍ"
+                      }
+                    }
+                  });
+
+      const visitasCanvas = document.getElementById("visitas-chart");
+                visitasChart = new Chart(visitasCanvas.getContext("2d"), {
+                   type: "bar",
+                 data: {
+                   labels: [
+                     "Es la primera vez",
+                     "Dos veces",
+                     "Tres veces o más"
+                   ],
+
+                   datasets: [
+                     {
+                        label: "Número de visitas",
+                       backgroundColor: "#36C2FF",
+                       stack: "Stack 0",
+                       data:  [0, 0, 0]
+                     },
+
+                   ]
+                 },
+                 options: {
+                   responsive: false,
+                   legend: {
+                     position: "bottom"
+                   },
+                   title: {
+                     display: true,
+                     text: "VISITAS A  LA ESTACIÓN"
+                   },
+                   scales: {
+                     xAxes: [
+                       {
+                         stacked: true
+                       }
+                     ],
+                     yAxes: [
+                       {
+                         stacked: true,
+                         ticks: {
+                           beginAtZero: true
+                         }
+                       }
+                     ]
+                   }
+                 }
+               });
+
+       const grupoCanvas = document.getElementById( "grupo-chart");
+               grupoChart = new Chart(grupoCanvas.getContext("2d"), {
+                    type: "bar",
+                    data: {
+                    labels: [
+                          "Sólo",
+                          "En pareja",
+                          "En familia con menores",
+                          "Con amigos"
+                            ],
+                      datasets: [
+                        {
+                              label: ["Grupos de esquiadores"],
+                              backgroundColor:"#2523AD",
+                              stack: "Stack 0",
+                              data:  [0, 0, 0, 0]
+                            },
+
+                          ]
+                        },
+                        options: {
+                          responsive: false,
+                          legend: {
+                            position: "bottom"
+                          },
+                          title: {
+                            display: true,
+                            text: "COMPAÑÍA"
+                          },
+                          scales: {
+                            xAxes: [
+                              {
+                                stacked: true
+                              }
+                            ],
+                            yAxes: [
+                              {
+                                stacked: true,
+                                ticks: {
+                                  beginAtZero: true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      });
+
+        }
+      });
+    </script>
+  </head>
+
+  <body>
+    <div id="viewDiv"></div>
+    <div id="panel">
+      <div style="padding: 15px;">
+
+        <canvas id="recomendacion-chart" height="250" width="400" text-align="center"></canvas>
+
+        <canvas
+          id="gender-chart"
+          width="200"
+          height="350"
+          style="float:left;"
+        ></canvas>
+
+        <canvas
+          id="nivel-chart"
+          width="200"
+          height="350"
+          style="float:left;"
+        ></canvas>
+
+        <canvas
+          id="edad-chart"
+           height="250" width="450"
+          style="float:left;"
+        ></canvas>
+
+        <canvas
+          id="visitas-chart"
+          width="220"
+          height="350"
+          style="float:left;"
+        ></canvas>
+
+        <canvas
+          id="grupo-chart"
+          width="250"
+          height="350"
+          style="float:left;"
+        ></canvas>
+
+      </div>
+    </div>
+  </body>
+</html>
